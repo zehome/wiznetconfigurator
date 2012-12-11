@@ -105,6 +105,7 @@ class WIZ1000(S2E):
     _type = "WIZ1000"
     _extended_fields = [
         ("rfc2217_port",        "short"),
+        ("rfc2217_password",    "str", 8, "%-8s"),
         ("search_password",     "str", 8, "%-8s"),
         ("keepalive_interval",  "short"),
         ("remote_ip_udp",       "ip"),
@@ -297,19 +298,26 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.DEBUG)
     searcher = WizSearch()
-    devices = searcher.search(1.0)
+    devices = searcher.search("wiznet", 1.0)
     pprint.pprint(devices)
 
     for device in devices:
         device.flow = "none"
         device.baudrate = 115200
         device.debug_enabled = False
-        addr = ('192.168.11.255', WIZ1x0SR_UDP_REMOTE_PORT)
-        wiz1x0sr_s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        wiz1x0sr_s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, True)
-        wiz1x0sr_s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
-        wiz1x0sr_s.bind(('0.0.0.0', WIZ1x0SR_UDP_LOCAL_PORT))
-        wiz1x0sr_s.sendto("SETT%s" % (device.pack(),), addr)
-        data, raddr = wiz1x0sr_s.recvfrom(1500)
+        if isinstance(device, WIZ1000):
+            rport = WIZ1000_UDP_REMOTE_PORT
+            lport = WIZ1000_UDP_LOCAL_PORT
+        else:
+            rport = WIZ1x0SR_UDP_REMOTE_PORT
+            lport = WIZ1x0SR_UDP_LOCAL_PORT
+
+        addr = ('192.168.11.255', rport)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, True)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        sock.bind(('0.0.0.0', lport))
+        sock.sendto("SETT%s" % (device.pack(),), addr)
+        data, raddr = sock.recvfrom(1500)
         print "Sent: %s" % (hexdump(device.pack()),)
         print "Received: %s" % (hexdump(data),)
