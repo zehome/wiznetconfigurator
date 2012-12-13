@@ -11,14 +11,9 @@ import struct
 import socket
 import select
 import logging
+from optparse import OptionParser
 
 logger = logging.getLogger("wiz1000")
-
-WIZ1000_UDP_LOCAL_PORT = 1138
-WIZ1000_UDP_REMOTE_PORT = 5003
-
-WIZ1x0SR_UDP_LOCAL_PORT = 5001
-WIZ1x0SR_UDP_REMOTE_PORT = 1460
 
 WIZNET_OPERATION_MODES = {0x00: "client", 0x01: "server", 0x02: "mixed"}
 WIZNET_PARITY = {0x00: "none", 0x01: "odd", 0x02: "even"}
@@ -31,8 +26,10 @@ WIZNET_BAUDRATES = {
     0xE8: 4800, 0xFD: 38400, 0xBB: 230400,
 }
 
+
 def hexdump(msg):
-    return ' '.join([ "%02x" % (ord(c),) for c in msg])
+    return ' '.join(["%02x" % (ord(c),) for c in msg])
+
 
 class S2E(object):
     """Represents a wiznet device"""
@@ -71,6 +68,8 @@ class S2E(object):
         ("wiznet_password",         "str", 8, "%-8s"),
     ]
     _extended_fields = []
+    UDP_LOCAL_PORT = None
+    UDP_REMOTE_PORT = None
 
     def __init__(self, data=None):
         self._fields = self._basic_fields + self._extended_fields
@@ -86,20 +85,37 @@ class S2E(object):
         if self.data is not None:
             unpacker = Unpacker(self.data, pos=0)
             unpacker.unpack(self)
+
     def pack(self):
         packer = Packer()
         return packer.pack(self)
 
+    def set_option(self, attr, value):
+        if attr not in [f[0] for f in self._fields]:
+            raise AttributeError("No such attribute '%s'" % (attr,))
+        setattr(self, attr, value)
+
+    def print_config(self):
+        print "Config for %s" % (self,)
+        for field in self._fields:
+            print "\t%s='%s'" % (field[0], getattr(self, field[0], None))
+
     def __unicode__(self):
         return u"%(ip)s %(mac)s %(type)s v%(firmware_version)s" % self.__dict__
+
     def __str__(self):
         return self.__unicode__()
+
     def __repr__(self):
         return self.__unicode__()
+
 
 class WIZ1x0SR(S2E):
     _type = "WIZ1x0SR"
     _extended_fields = []
+    UDP_LOCAL_PORT = 5001
+    UDP_REMOTE_PORT = 1460
+
 
 class WIZ1000(S2E):
     _type = "WIZ1000"
@@ -110,6 +126,9 @@ class WIZ1000(S2E):
         ("keepalive_interval",  "short"),
         ("remote_ip_udp",       "ip"),
     ]
+    UDP_LOCAL_PORT = 1138
+    UDP_REMOTE_PORT = 5003
+
 
 class Unpacker(object):
     """Helper class to unpack data received from WIZNet device"""
@@ -130,7 +149,7 @@ class Unpacker(object):
     def unpack_ip(self):
         ip = struct.unpack(">BBBB", self.data[self.pos:self.pos + 4])
         self.pos += 4
-        return ".".join([ "%d" for x in xrange(4)]) % ip
+        return ".".join(["%d" for x in xrange(4)]) % ip
 
     def unpack_firmversion(self):
         version = struct.unpack(">BB", self.data[self.pos:self.pos + 2])
@@ -209,7 +228,7 @@ class Packer(object):
         return struct.pack(">H", value)
 
     def pack_byte(self, value):
-        return struct.pack(">B", value)
+        return struct.pack(">B", int(value))
 
     def pack_bool(self, value, inverted=False):
         fmt = ">B"
@@ -239,85 +258,192 @@ class Packer(object):
         fmt = "B" * length
         return struct.pack(fmt, *[ int(x, 16) for x in value.split() ])
 
+
+class WizSearchException(Exception):
+    pass
+
+
 class WizSearch(object):
-    def __init__(self, bind_address="0.0.0.0"):
-        # WIZ1000 UDP IPv4 Socket
-        wiz1000_s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        wiz1000_s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, True)
-        wiz1000_s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
-        wiz1000_s.bind((bind_address, WIZ1000_UDP_LOCAL_PORT))
-        self.wiz1000_sock = wiz1000_s
-        # WIZ1x0SR UDP IPv4 Socket
-        wiz1x0sr_s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        wiz1x0sr_s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, True)
-        wiz1x0sr_s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
-        wiz1x0sr_s.bind((bind_address, WIZ1x0SR_UDP_LOCAL_PORT))
-        self.wiz1x0sr_sock = wiz1x0sr_s
+    DEVICE_TYPES = {
+        "wiz1000": WIZ1000,
+        "wiz1x0sr": WIZ1x0SR,
+    }
 
-    def search(self, search_password="wiznet", timeout=5.0):
-        """
-        Search devices using UDP broadcast. timeout is expressed in seconds.
-        """
-        devices = []
-        wiz1000_addr = ('192.168.11.255', WIZ1000_UDP_REMOTE_PORT)
-        wiz1x0sr_addr = ('192.168.11.255', WIZ1x0SR_UDP_REMOTE_PORT)
+    def __init__(self, address="192.168.11.255",
+                 broadcast=False,
+                 bind_address="0.0.0.0",
+                 device_type="wiz1000",
+                 allowed_mac=None,
+                 search_password="wiznet", timeout=2.0):
 
-        # Targetting WIZ1000 S2E (V4.1+)
-        logger.info("Sending FIND packet to %s..", wiz1000_addr)
-        self.wiz1000_sock.sendto("FIND%-8s" % (search_password,), wiz1000_addr)
-        # Targetting WIZ1x0SR
-        logger.info("Sending FIND packet to %s..", wiz1x0sr_addr)
-        self.wiz1x0sr_sock.sendto("FIND%-8s" % (search_password,), wiz1x0sr_addr)
-        
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+
+        if broadcast:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, True)
+        s.bind((
+            bind_address,
+            WizSearch.DEVICE_TYPES[device_type].UDP_LOCAL_PORT,
+        ))
+        self.device_s = s
+
+        self.search_password = search_password
+        self.timeout = timeout
+        self.address = (
+            address,
+            WizSearch.DEVICE_TYPES[device_type].UDP_REMOTE_PORT,
+        )
+        self.device_type = device_type
+        self._devices_list = []
+        self.allowed_mac = allowed_mac or []
+        self.broadcast = broadcast
+
+    def sendto(self, data):
+        logger.debug("sendto %s" % (data[:4],))
+        self.device_s.sendto(data, self.address)
+
+    def recvfrom(self, size=1500):
+        data, addr = self.device_s.recvfrom(size)
+        if not self.broadcast and addr != self.address:
+            raise WizSearchException(
+                "Unexpected packet recevied from %s, expected was %s" % (
+                    addr, self.address))
+        logger.debug("recvfrom: %s" % (data[:4]))
+        return data
+
+    def get_devices(self):
+        devices = {}
+        for device in self._devices_list:
+            if device.mac in devices:
+                raise WizSearchException(
+                    "Multiple devices found with mac '%s'" % (
+                        device.mac,
+                    ))
+            devices[device.mac] = device
+        return devices
+
+    def update(self):
+        """
+        Search devices. timeout is expressed in seconds.
+        """
+        self._devices_list = []
+        self.sendto("FIND%-8s" % (self.search_password,))
+
         start = time.time()
-        while start + timeout > time.time():
-            rfds, wfds, efds = select.select([ self.wiz1000_sock, 
-                                               self.wiz1x0sr_sock,
-                                             ], [], [], 0.5)
+        while start + self.timeout > time.time():
+            rfds, _, _ = select.select([self.device_s], [], [], 0.5)
+
             for sock in rfds:
-                data, raddr = sock.recvfrom(1500)
-                logger.debug("Received len(data)=%d from %s", len(data), raddr)
-                if data[0:4] == "IMIN":
-                    if raddr[1] == WIZ1x0SR_UDP_REMOTE_PORT:
-                        klass = WIZ1x0SR
-                    else:
-                        klass = WIZ1000
+                data = self.recvfrom()
+                if data[0:4] in ("IMIN", "SETC"):
                     try:
-                        s2e = klass(data[4:])
+                        dev = WizSearch.DEVICE_TYPES[self.device_type](data[4:])
                         # devices.append(self.extract_IMIN(data, wiztype))
-                        devices.append(s2e)
+                        if not self.allowed_mac or dev.mac in self.allowed_mac:
+                            self._devices_list.append(dev)
                     except:
                         logger.exception("parsing error.")
-                        print "Unrecognized device %s responded to IMIN." % (
-                            raddr,)
-        return devices
-        logger.info("Search timeout occured.")
+
+        if not self._devices_list:
+            logger.error("Timeout, no devices found")
+        return self._devices_list
+
+    def send_config(self, device):
+        data = device.pack()
+        self.sendto("SETT%s" % (data,))
+        ack = self.recvfrom()
+        if ack[:4] != "SETC":
+            logger.error("Unexpected data '%s'" % (data[:4]))
+        if ack[4:] != data:
+            logger.error("ACK failed")
+        else:
+            logger.debug("ACK sucess")
+
+    def set_options(self, **kwargs):
+        devices = self.get_devices()
+        for dev in devices.values():
+            for opt, val in kwargs.items():
+                dev.set_option(opt, val)
+            if kwargs:
+                self.send_config(dev)
+            else:
+                dev.print_config()
+
+    @staticmethod
+    def main():
+        parser = OptionParser()
+        parser.add_option(
+            "-b", dest="broadcast_address",
+            action="store",
+            help="Broadcast address",
+        )
+        parser.add_option(
+            "-a", dest="address",
+            help="Device IP address",
+        )
+        parser.add_option(
+            "--device-type",
+            choices=["wiz1000", "wiz1x0sr"],
+            default="wiz1000",
+            help="Device type",
+        )
+        parser.add_option(
+            "-m", dest="mac_list",
+            help="Limit actions to theses mac address",
+        )
+        parser.add_option(
+            "-s", dest="device_search_password",
+            default="wiznet",
+            help="Search password",
+        )
+
+        # Generate options based on fields descriptions
+        fields = WIZ1000._basic_fields + WIZ1000._extended_fields
+        for field in fields:
+            option = "--%s" % (field[0].replace("_", "-"),)
+            kwargs = {}
+            if field[1] == "bool":
+                kwargs["action"] = "store_true"
+            if field[1] == "short":
+                kwargs["type"] = "int"
+            if field[1] == "dictvalues":
+                choices = field[2].values()
+                if isinstance(choices[0], int):
+                    kwargs["type"] = "int"
+                else:
+                    kwargs["choices"] = choices
+                kwargs["help"] = ",".join(["%s" % (v,) for v in choices])
+            parser.add_option(option, dest=field[0], **kwargs)
+            if field[1] == "bool":
+                # For boolean field, add --no-option
+                kwargs["action"] = "store_false"
+                parser.add_option("--no-%s" % (field[0].replace("_", "-"),),
+                                  dest=field[0], **kwargs)
+        options, _ = parser.parse_args()
+
+        kwargs = {}
+        for field in fields:
+            value = getattr(options, field[0])
+            if value is not None:
+                kwargs[field[0]] = value
+
+        search_kwargs = {
+            "broadcast": True,
+            "address": "192.168.11.255",
+            "device_type": options.device_type,
+            "search_password": options.device_search_password,
+        }
+        if options.mac_list:
+            search_kwargs["allowed_mac"] = options.mac_list.split(',')
+        if options.broadcast_address:
+            search_kwargs["address"] = options.broadcast_address
+        if options.address:
+            search_kwargs["address"] = options.address
+            search_kwargs["broadcast"] = False
+        searcher = WizSearch(**search_kwargs)
+        searcher.update()
+        searcher.set_options(**kwargs)
 
 if __name__ == "__main__":
-    import pprint
-
-    logging.basicConfig(level=logging.DEBUG)
-    searcher = WizSearch()
-    devices = searcher.search("wiznet", 1.0)
-    pprint.pprint(devices)
-
-    for device in devices:
-        device.flow = "none"
-        device.baudrate = 115200
-        device.debug_enabled = False
-        if isinstance(device, WIZ1000):
-            rport = WIZ1000_UDP_REMOTE_PORT
-            lport = WIZ1000_UDP_LOCAL_PORT
-        else:
-            rport = WIZ1x0SR_UDP_REMOTE_PORT
-            lport = WIZ1x0SR_UDP_LOCAL_PORT
-
-        addr = ('192.168.11.255', rport)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, True)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
-        sock.bind(('0.0.0.0', lport))
-        sock.sendto("SETT%s" % (device.pack(),), addr)
-        data, raddr = sock.recvfrom(1500)
-        print "Sent: %s" % (hexdump(device.pack()),)
-        print "Received: %s" % (hexdump(data),)
+    logging.basicConfig(level=logging.INFO)
+    WizSearch.main()

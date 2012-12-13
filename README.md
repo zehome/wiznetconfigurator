@@ -13,13 +13,30 @@ but modified to support as many S2E devices as possible.
 
 I only have WIZ1000 & WIZ110SR for now, so that's what I'm supporting.
 
-Thoses devices can communicate over the network using broadcast to
-find them, and configure them.
+Thoses devices can communicate over the network to find them, and configure them.
 
- - Default IP address: static in 192.168.11.0/24
- - Default password: "wiznet"
+ - Default broadcast address 192.168.11.255
+ - Default search password: "wiznet"
 
 Read the source for more details.
+
+Exemples
+--------
+
+$ python main.py --help
+
+Broadcast search on 192.168.11.255 and print config for each device found:
+
+$ python main.py -b 192.168.11.255
+
+Broadcast set debug_enabled on 192.168.11.255 and mac = aa:bb:cc:dd:ee:ff
+
+$ python main.py -b 192.168.11.255 -m aa:bb:cc:dd:ee:ff --debug-enabled
+
+Set debug_enabled only on 192.168.11.2
+
+$ python main.py -a 192.168.11.2 --debug-enabled
+
 
 Author
 ------
